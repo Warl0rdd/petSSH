@@ -2,23 +2,29 @@ package server
 
 import (
 	"errors"
+	"fmt"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/terminal"
+	"log"
 	"log/slog"
 	"net"
 	"strings"
 )
 
 type Server struct {
-	Addr string
-	ln   net.Listener
+	Addr      string
+	sshConfig *ssh.ServerConfig
+	ln        net.Listener
 }
 
-func New(addr string) (*Server, error) {
+func New(addr string, config *ssh.ServerConfig) (*Server, error) {
 	if strings.TrimSpace(addr) == "" {
 		return nil, errors.New("empty address")
 	}
 
 	return &Server{
-		Addr: addr,
+		Addr:      addr,
+		sshConfig: config,
 	}, nil
 }
 
@@ -51,7 +57,13 @@ func (s *Server) ListenAndServe(done <-chan struct{}) error {
 			}
 
 			go func(c net.Conn) {
-				// s.handleConn(c)
+				// TODO: closure for graceful shutdown handling
+				sshConn, chans, reqs, err := ssh.NewServerConn(c, s.sshConfig)
+				if err != nil {
+					slog.Info("failed handshake", "err", err, "addr", conn.RemoteAddr().String())
+					return
+				}
+				s.handleConn(sshConn, chans, reqs)
 			}(conn)
 		}
 	}()
@@ -67,5 +79,41 @@ func (s *Server) ListenAndServe(done <-chan struct{}) error {
 		}
 		return nil
 	}
+}
 
+func (s *Server) handleConn(conn *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request) {
+	go ssh.DiscardRequests(reqs)
+	for newChannel := range chans {
+		if newChannel.ChannelType() != "session" {
+			_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+			continue
+		}
+
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			log.Fatalf("Could not accept channel: %v", err)
+		}
+
+		go func(in <-chan *ssh.Request) {
+			for req := range in {
+				_ = req.Reply(req.Type == "shell", nil)
+			}
+		}(requests)
+
+		term := terminal.NewTerminal(channel, "> ")
+
+		go func() {
+			defer func() {
+				_ = channel.Close()
+				_ = conn.Close()
+			}()
+			for {
+				line, err := term.ReadLine()
+				if err != nil {
+					break
+				}
+				fmt.Println(line)
+			}
+		}()
+	}
 }
