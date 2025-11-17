@@ -7,71 +7,57 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"petssh/internal/server"
 	"runtime"
 	"syscall"
 )
 
 func main() {
-	// Verify that the OS is linux and process command line flags
+	// Platform check
 	if runtime.GOOS != "linux" {
 		log.Fatalf("unsupported OS: %s, only linux is supported", runtime.GOOS)
 	}
+	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	defaultHostKeyDir := os.Getenv("HOME") + "/.ssh"
+	home := os.Getenv("HOME")
+	if home == "" {
+		log.Fatalf("HOME env is not set")
+	}
+
+	defaultHostKeyDir := filepath.Join(home, ".ssh")
 
 	var (
-		addr                = flag.String("a", ":80", "server address")
+		addr                = flag.String("a", ":22", "server address")
 		hostKeyDir          = flag.String("keyDir", defaultHostKeyDir, "host key directory")
-		authorizedKeysDir   = flag.String("ak", defaultHostKeyDir+"/authorized_keys", "authorized keys file")
+		authorizedKeysFile  = flag.String("ak", filepath.Join(defaultHostKeyDir, "authorized_keys"), "authorized_keys file")
 		passwordAuthEnabled = flag.Bool("p", false, "enable password auth")
 	)
-
 	flag.Parse()
 
-	// Verify required files existence
-	if _, err := os.Stat(*hostKeyDir + "/ssh_host_ed25519"); err != nil {
-		log.Fatal(err)
+	// Validate required files
+	privPath := filepath.Join(*hostKeyDir, "ssh_host_ed25519")
+
+	if !fileExists(privPath) {
+		log.Fatalf("missing private host key: %s", privPath)
+	}
+	if !isRegularFile(*authorizedKeysFile) {
+		log.Fatalf("authorized keys file does not exist or is not a regular file: %s", *authorizedKeysFile)
 	}
 
-	if _, err := os.Stat(*hostKeyDir + "/ssh_host_ed25519.pub"); err != nil {
-		log.Fatal(err)
-	}
-
-	if info, err := os.Stat(*authorizedKeysDir); err != nil || !info.Mode().IsRegular() {
-		log.Fatal("authorized keys file does not exist or is not a regular file")
-	}
-
-	authorizedKeysBytes, err := os.ReadFile("authorized_keys")
+	// Load authorized keys
+	authorizedKeysMap, err := loadAuthorizedKeys(*authorizedKeysFile)
 	if err != nil {
-		log.Fatalf("Failed to load authorized_keys, err: %v", err)
+		log.Fatalf("failed to load authorized keys: %v", err)
 	}
 
-	// Parse authorized keys
-	authorizedKeysMap := map[string]bool{}
-	for len(authorizedKeysBytes) > 0 {
-		pubKey, _, _, rest, err := ssh.ParseAuthorizedKey(authorizedKeysBytes)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		authorizedKeysMap[string(pubKey.Marshal())] = true
-		authorizedKeysBytes = rest
-	}
-
-	// Parse host private key
-
-	privateBytes, err := os.ReadFile(*hostKeyDir + "/ssh_host_ed25519")
+	// Load host private key
+	private, err := loadPrivateKey(privPath)
 	if err != nil {
-		log.Fatal("Failed to load private key: ", err)
+		log.Fatalf("failed to load private key: %v", err)
 	}
 
-	private, err := ssh.ParsePrivateKey(privateBytes)
-	if err != nil {
-		log.Fatal("Failed to parse private key: ", err)
-	}
-
-	// Setup ssh config
+	// Prepare ssh.ServerConfig
 	config := &ssh.ServerConfig{
 		MaxAuthTries: 3,
 		PublicKeyCallback: func(c ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
@@ -85,35 +71,70 @@ func main() {
 			return nil, fmt.Errorf("unknown public key for %q", c.User())
 		},
 	}
-
 	config.AddHostKey(private)
 
-	if *passwordAuthEnabled {
-		// TODO implement
-	}
-
-	// Setup server
-	s, err := server.New(*addr, config)
-
+	// Create server
+	srv, err := server.New(*addr, config)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("failed to create server: %v", err)
 	}
 
-	if err := s.ListenAndServe(nil); err != nil {
-		log.Fatal(err)
-	}
-
-	done := make(chan struct{})
 	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
 	go func() {
 		<-sigCh
-		fmt.Println("Shutting down...")
+		log.Println("shutdown signal received")
 		close(done)
 	}()
 
-	if err := s.ListenAndServe(done); err != nil {
-		log.Fatal(err)
+	log.Printf("starting server on %s (password auth: %t)", *addr, *passwordAuthEnabled)
+	if err := srv.ListenAndServe(done); err != nil {
+		log.Fatalf("server exited with error: %v", err)
 	}
+	log.Println("server stopped")
+}
+
+// fileExists reports whether path exists (dir or file)
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// isRegularFile checks whether path exists and is a regular file
+func isRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode().IsRegular()
+}
+
+// loadAuthorizedKeys reads authorized keys file and returns map[marshal]bool
+func loadAuthorizedKeys(path string) (map[string]bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]bool)
+	rest := b
+	for len(rest) > 0 {
+		pubKey, _, _, r, err := ssh.ParseAuthorizedKey(rest)
+		if err != nil {
+			return nil, err
+		}
+		m[string(pubKey.Marshal())] = true
+		rest = r
+	}
+	return m, nil
+}
+
+// loadPrivateKey parses the private key file and returns ssh.Signer
+func loadPrivateKey(path string) (ssh.Signer, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return ssh.ParsePrivateKey(b)
 }
