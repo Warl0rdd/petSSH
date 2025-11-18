@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"petssh/internal/server"
+	"petssh/internal/utils"
 	"runtime"
 	"syscall"
 )
@@ -38,21 +39,21 @@ func main() {
 	// Validate required files
 	privPath := filepath.Join(*hostKeyDir, "ssh_host_ed25519")
 
-	if !fileExists(privPath) {
+	if !utils.FileExists(privPath) {
 		log.Fatalf("missing private host key: %s", privPath)
 	}
-	if !isRegularFile(*authorizedKeysFile) {
+	if !utils.IsRegularFile(*authorizedKeysFile) {
 		log.Fatalf("authorized keys file does not exist or is not a regular file: %s", *authorizedKeysFile)
 	}
 
 	// Load authorized keys
-	authorizedKeysMap, err := loadAuthorizedKeys(*authorizedKeysFile)
+	authorizedKeysMap, err := utils.LoadAuthorizedKeys(*authorizedKeysFile)
 	if err != nil {
 		log.Fatalf("failed to load authorized keys: %v", err)
 	}
 
 	// Load host private key
-	private, err := loadPrivateKey(privPath)
+	private, err := utils.LoadPrivateKey(privPath)
 	if err != nil {
 		log.Fatalf("failed to load private key: %v", err)
 	}
@@ -94,47 +95,4 @@ func main() {
 		log.Fatalf("server exited with error: %v", err)
 	}
 	log.Println("server stopped")
-}
-
-// fileExists reports whether path exists (dir or file)
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// isRegularFile checks whether path exists and is a regular file
-func isRegularFile(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return info.Mode().IsRegular()
-}
-
-// loadAuthorizedKeys reads authorized keys file and returns map[marshal]bool
-func loadAuthorizedKeys(path string) (map[string]bool, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	m := make(map[string]bool)
-	rest := b
-	for len(rest) > 0 {
-		pubKey, _, _, r, err := ssh.ParseAuthorizedKey(rest)
-		if err != nil {
-			return nil, err
-		}
-		m[string(pubKey.Marshal())] = true
-		rest = r
-	}
-	return m, nil
-}
-
-// loadPrivateKey parses the private key file and returns ssh.Signer
-func loadPrivateKey(path string) (ssh.Signer, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return ssh.ParsePrivateKey(b)
 }
