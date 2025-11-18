@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"petssh/internal/auth"
 	"petssh/internal/server"
 	"petssh/internal/utils"
 	"runtime"
@@ -73,6 +74,17 @@ func main() {
 		},
 	}
 	config.AddHostKey(private)
+
+	if *passwordAuthEnabled {
+		config.PasswordCallback = func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+			ok, err := auth.AuthenticateWithPassword(c.User(), pass)
+			if !ok || err != nil {
+				return nil, err
+			} else {
+				return &ssh.Permissions{}, nil
+			}
+		}
+	}
 
 	// Create server
 	srv, err := server.New(*addr, config)

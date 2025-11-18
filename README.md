@@ -19,5 +19,7 @@ go run cmd/genHostKey/main.go ~/.ssh
 
 ```bash
 go build ./cmd/sshd
-./sshd -a=:2323 -keyDir=~/.ssh -ak=~/.ssh/authorized_keys
+sudo ./sshd -a=:2323 -keyDir=~/.ssh -ak=~/.ssh/authorized_keys
 ```
+
+Important: sshd is required to start as root as it needs access to PAM API. Processes' privileges of each user's connection are dropped according to one's privileges.
